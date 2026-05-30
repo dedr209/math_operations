@@ -17,7 +17,7 @@ class SimplexSolver:
              x >= 0
     
     Система автоматично перетворюється в канонічний вигляд з додаванням
-    слабких змінних: A*x + s = b, де s >= 0 (слабкі змінні).
+    вільних змінних: A*x + s = b, де s >= 0 (вільні змінні).
     """
     
     def __init__(self, A: List[List], b: List, c: List):
@@ -30,7 +30,7 @@ class SimplexSolver:
             c: коефіцієнти цільової функції (довжина n)
         """
         self.m = len(A)  # кількість обмежень
-        self.n = len(A[0]) if A else 0  # кількість оригінальних змінних
+        self.n = len(A[0]) if A else 0  # кількість основних змінних
         
         # Конвертуємо в Fraction для точних обчислень
         self.A_original = [[Fraction(A[i][j]) for j in range(self.n)] for i in range(self.m)]
@@ -52,13 +52,13 @@ class SimplexSolver:
         self.iterations = 0
         
     def _add_slack_variables(self):
-        """Додає слабкі змінні для перетворення нерівностей <= у рівняння.
+        """Додає вільні змінні для перетворення нерівностей <= у рівняння.
 
-        Підбирає розширену таблицю без додаткового рядка цільової функції.
+        Підбирає розширену таблицю без додаткового рядка цільової функії.
         Ініціалізує вектор C_b (коефіцієнти цільової функції для базисних змінних)
         та розширений вектор коефіцієнтів цільової функції c_extended.
         """
-        # Розширена матриця: [A | I | b] (I - одиничні вектори для слабких змінних)
+        # Розширена матриця: [A | I | b] (I - одиничні вектори для вільних змінних)
         self.tableau = []
         for i in range(self.m):
             row = self.A_original[i][:] + [Fraction(0)] * self.m + [self.b[i]]
@@ -66,11 +66,11 @@ class SimplexSolver:
             row[self.n + i] = Fraction(1)
             self.tableau.append(row)
 
-        # Розширений вектор коефіцієнтів цільової функції: c для оригінальних змінних + 0 для слабких
+        # Розширений вектор коефіцієнтів цільової функії: c для основних змінних + 0 для вільних
         self.c_extended = self.c_original[:] + [Fraction(0)] * self.m
 
         # Ініціалізуємо вектор C_b (коефіцієнти цільової функції для базисних змінних)
-        # Спочатку в базисі слабкі змінні з нульовими коефіцієнтами
+        # Спочатку в базисі вільні змінні з нульовими коефіцієнтами
         self.C_b = [Fraction(0)] * self.m
 
         # Ініціалізуємо базові та небазові змінні
@@ -79,6 +79,35 @@ class SimplexSolver:
 
         # Індексний рядок (Delta) ще не обчислено
         self.delta = None
+
+    def build_initial_tableau(self):
+        """Формує початкову симплекс-таблицю з вільними змінними як початковим базисом.
+
+        Це публічний метод-обгортка над внутрішнім _add_slack_variables(),
+        щоб виклик формування таблиці був зрозумілішим у публічному API.
+        """
+        self._add_slack_variables()
+
+    def compute_delta(self):
+        """Публічний метод для обчислення індексного рядка Δ.
+
+        Повертає список оцінок Δ_j для всіх стовпців (включно з RHS/A0 в кінці).
+        """
+        return self._compute_delta()
+
+    def is_optimal(self, delta: Optional[list] = None) -> bool:
+        """Перевіряє критерій оптимальності для задачі максимізації.
+
+        Якщо немає від'ємних оцінок Δ_j серед стовпців змінних (без RHS/A0),
+        план вважається оптимальним.
+        """
+        if delta is None:
+            delta = self._compute_delta()
+        # Перевіряємо тільки стовпці змінних (не включаємо RHS/A0)
+        for j in range(self.n + self.m):
+            if delta[j] < 0:
+                return False
+        return True
 
     def _compute_delta(self):
         """Обчислює індексний рядок Δ_j = sum_i C_b[i] * tableau[i][j] - c_j для всіх стовпців,
@@ -103,8 +132,8 @@ class SimplexSolver:
         delta = self._compute_delta()
         entering = None
         min_val = Fraction(0)
-        # Перебираємо всі стовпці окрім індексу за замовчуванням (але включаючи RHS для правила)
-        for j in range(len(delta) - 0):
+        # Перебираємо всі стовпці змінних (без стовпця RHS/A0)
+        for j in range(self.n + self.m):
             if delta[j] < min_val:
                 min_val = delta[j]
                 entering = j
@@ -130,17 +159,20 @@ class SimplexSolver:
     def _pivot(self, entering: int, leaving_row: int):
         """
         Виконує крок симплекс-методу (поворот таблиці) і оновлює C_b відповідно до нового базису.
+        (Реалізація методом Жордана-Гаусса — нормалізація опорного рядка і
+        занулення відповідного стовпця у всіх інших рядках.)
         """
         pivot_element = self.tableau[leaving_row][entering]
-        # Нормалізуємо рядок з розв'язуючим елементом
+        # Нормалізуємо опорний рядок
         row_len = len(self.tableau[leaving_row])
         for j in range(row_len):
             self.tableau[leaving_row][j] /= pivot_element
-        # Приводимо всі інші рядки
+        # Застосовуємо правило прямокутника (Jordan-Gauss): занулюємо стовпець entering
         for i in range(self.m):
             if i != leaving_row:
                 factor = self.tableau[i][entering]
                 for j in range(row_len):
+                    # a_ij := a_ij - factor * a_pivotj
                     self.tableau[i][j] -= factor * self.tableau[leaving_row][j]
         # Оновлюємо базис і C_b
         old_basis_var = self.basis[leaving_row]
@@ -152,8 +184,47 @@ class SimplexSolver:
         if entering in self.non_basis:
             self.non_basis.remove(entering)
         self.non_basis.append(old_basis_var)
-        # Після повороту індексний рядок буде оновлено при наступному обчисленні
+        # Після повороту індексний рядок буде обчислено знову при наступному виклику
         self.delta = None
+
+    def iterate(self) -> Dict:
+        """Виконує одну ітерацію симплекс-методу.
+
+        Повертає словник з інформацією про крок:
+         - 'status': 'continue', 'optimal', або 'unbounded'
+         - 'entering': індекс стовпця що входить у базис (або None)
+         - 'leaving_row': індекс рядка що виходить з базису (або None)
+        """
+        # Обчислюємо індексний рядок
+        delta = self._compute_delta()
+        # Перевіряємо оптимальність
+        if self.is_optimal(delta):
+            return {'status': 'optimal', 'entering': None, 'leaving_row': None}
+        # Вибираємо напрямний стовпець: найменше (найбільш від'ємне) значення Δ серед змінних
+        entering = None
+        min_delta = Fraction(0)
+        for j in range(self.n + self.m):
+            if delta[j] < min_delta:
+                min_delta = delta[j]
+                entering = j
+        # Якщо entering не знайдений (мабуть через числові нюанси) — вважаємо оптимум
+        if entering is None:
+            return {'status': 'optimal', 'entering': None, 'leaving_row': None}
+        # Шукаємо напрямний рядок за мінімальним позитивним симплекс-відношенням θ = RHS / a_ij
+        min_ratio = None
+        leaving_row = None
+        for i in range(self.m):
+            a_ij = self.tableau[i][entering]
+            if a_ij > 0:
+                theta = self.tableau[i][-1] / a_ij
+                if min_ratio is None or theta < min_ratio:
+                    min_ratio = theta
+                    leaving_row = i
+        if leaving_row is None:
+            return {'status': 'unbounded', 'entering': entering, 'leaving_row': None}
+        # Виконуємо поворот (Jordan-Gauss)
+        self._pivot(entering, leaving_row)
+        return {'status': 'continue', 'entering': entering, 'leaving_row': leaving_row}
 
     def solve(self) -> Dict:
         """
@@ -161,7 +232,7 @@ class SimplexSolver:
         Реалізовано згідно з академічною методикою: індексний рядок Δ обчислюється
         як Δ_j = sum(C_b[i] * tableau[i][j]) - c_j; умова оптимальності — всі Δ_j >= 0.
         """
-        # Додаємо слабкі змінні і підготуємо структури
+        # Додаємо вільні змінні і підготуємо структури
         self._add_slack_variables()
         max_iterations = 10000
         while True:
@@ -173,7 +244,9 @@ class SimplexSolver:
             # Критерій оптимальності: всі Δ_j >= 0
             entering = None
             min_delta = Fraction(0)
-            for j, val in enumerate(delta):
+            # Перебираємо тільки змінні (не включаємо стовпець RHS/A0)
+            for j in range(self.n + self.m):
+                val = delta[j]
                 if val < min_delta:
                     min_delta = val
                     entering = j
@@ -213,7 +286,7 @@ class SimplexSolver:
     def print_tableau(self):
         """Виводить поточну симплекс-таблицю у форматі академічної методики.
 
-        Виводить стовпець C_b, назви змінних (x1..xn та слабкі x_{n+1}..), матрицю коефіцієнтів,
+        Виводить стовпець C_b, назви змінних (x1..xn та вільні x_{n+1}..), матрицю коефіцієнтів,
         RHS (A0) та нижній рядок оцінок Δ.
         """
         if self.tableau is None:
@@ -225,7 +298,7 @@ class SimplexSolver:
             if j < self.n:
                 var_names.append(f"x_{j+1}")
             else:
-                var_names.append(f"x_{j+1}")  # слабкі як продовження нумерації
+                var_names.append(f"x_{j+1}")  # вільні як продовження нумерації
         var_names.append("A0")  # RHS
         # Обчислюємо індексний рядок перед виводом
         delta = self._compute_delta()

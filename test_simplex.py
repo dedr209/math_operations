@@ -100,7 +100,7 @@ class TestSimplexSolver(unittest.TestCase):
         self.assertEqual(result['objective_value'], Fraction(50))
     
     def test_slack_variables_created(self):
-        """Тест того, що слабкі змінні автоматично додаються"""
+        """Тест того, що вільні змінні автоматично додаються"""
         A = [[1, 1], [2, 1]]
         b = [10, 15]
         c = [2, 3]
