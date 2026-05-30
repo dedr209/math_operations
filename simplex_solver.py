@@ -223,12 +223,12 @@ class SimplexSolver:
         for i in range(self.m):
             s = self.signs[i]
             if s == '<=':
-                # додати slack
+                # додати додаткову змінну (+1)
                 col_ops[i].append((next_col, Fraction(1)))
                 slack_cols.append(next_col)
                 next_col += 1
             elif s == '>=':
-                # surplus then artificial
+                # від'ємна змінна (-1) та штучна змінна (+1)
                 col_ops[i].append((next_col, Fraction(-1)))
                 surplus_cols.append(next_col)
                 next_col += 1
@@ -236,7 +236,7 @@ class SimplexSolver:
                 artificial_cols.append(next_col)
                 next_col += 1
             elif s == '=':
-                # artificial only
+                # штучна змінна (+1)
                 col_ops[i].append((next_col, Fraction(1)))
                 artificial_cols.append(next_col)
                 next_col += 1
@@ -245,6 +245,14 @@ class SimplexSolver:
 
         total_added = next_col - self.n
         self.total_vars = self.n + total_added
+        # Збережемо індекс та коефіцієнт першої доданої колонки для кожного обмеження
+        self.added_col_info = []
+        for i in range(self.m):
+            if col_ops[i]:
+                first_col, first_coeff = col_ops[i][0]
+                self.added_col_info.append((first_col, first_coeff))
+            else:
+                self.added_col_info.append((None, None))
 
         # Побудуємо tableau: кожний рядок = A[i] + zeros(added) + [b_i], потім встановимо коефіцієнти доданих стовпців
         self.tableau = []
@@ -651,12 +659,25 @@ class SimplexSolver:
         delta = self._compute_delta()
         # початкові додаткові змінні мали індекси n..n+added-1
         dual = []
+        # Використовуємо збережену інформацію про першу додану колонку для кожного обмеження
         for i in range(self.m):
-            idx = self.n + i
-            if idx < len(delta):
-                dual.append(delta[idx])
-            else:
+            idx, coeff = (None, None)
+            if hasattr(self, 'added_col_info'):
+                idx, coeff = self.added_col_info[i]
+            if idx is None or idx >= len(delta) or coeff is None:
                 dual.append(Fraction(0))
+            else:
+                val = delta[idx]
+                # dual y_i = delta[idx] / coeff  (коригуємо знак коли coeff == -1)
+                try:
+                    if isinstance(val, MValue):
+                        # MValue supports division by scalar
+                        y = val / coeff
+                    else:
+                        y = val / coeff
+                except Exception:
+                    y = val
+                dual.append(y)
         report = {'primal_x': primal, 'F_max': F_max, 'dual_y': dual}
         if as_str:
             report['primal_x_str'] = [self._frac_to_str(v) for v in report['primal_x']]
