@@ -52,7 +52,12 @@ class SimplexSolver:
         self.iterations = 0
         
     def _add_slack_variables(self):
-        """Додає слабкі змінні для перетворення нерівностей <= у рівняння."""
+        """Додає слабкі змінні для перетворення нерівностей <= у рівняння.
+
+        Підбирає розширену таблицю без додаткового рядка цільової функції.
+        Ініціалізує вектор C_b (коефіцієнти цільової функції для базисних змінних)
+        та розширений вектор коефіцієнтів цільової функції c_extended.
+        """
         # Розширена матриця: [A | I | b] (I - одиничні вектори для слабких змінних)
         self.tableau = []
         for i in range(self.m):
@@ -60,223 +65,201 @@ class SimplexSolver:
             # Додаємо одиничну матрицю для слабких змінних
             row[self.n + i] = Fraction(1)
             self.tableau.append(row)
-        
-        # Рядок цільової функції: [c | 0 | 0]
-        # (для максимізації: симплекс-метод робить коефіцієнти від'ємними)
-        objective_row = self.c_original[:] + [Fraction(0)] * (self.m + 1)
-        self.tableau.append(objective_row)
-        
-        # Ініціалізуємо базові та вільні змінні
-        # Базові: слабкі змінні (s_1, s_2, ..., s_m)
+
+        # Розширений вектор коефіцієнтів цільової функції: c для оригінальних змінних + 0 для слабких
+        self.c_extended = self.c_original[:] + [Fraction(0)] * self.m
+
+        # Ініціалізуємо вектор C_b (коефіцієнти цільової функції для базисних змінних)
+        # Спочатку в базисі слабкі змінні з нульовими коефіцієнтами
+        self.C_b = [Fraction(0)] * self.m
+
+        # Ініціалізуємо базові та небазові змінні
         self.basis = list(range(self.n, self.n + self.m))
-        # Вільні: оригінальні змінні (x_1, x_2, ..., x_n)
         self.non_basis = list(range(self.n))
-    
+
+        # Індексний рядок (Delta) ще не обчислено
+        self.delta = None
+
+    def _compute_delta(self):
+        """Обчислює індексний рядок Δ_j = sum_i C_b[i] * tableau[i][j] - c_j для всіх стовпців,
+        включаючи стовпець вільних членів (RHS / A0)."""
+        num_cols = self.n + self.m + 1  # останній стовпець - RHS (A0)
+        delta = [Fraction(0)] * num_cols
+        for j in range(num_cols):
+            s = Fraction(0)
+            for i in range(self.m):
+                s += self.C_b[i] * self.tableau[i][j]
+            c_j = self.c_extended[j] if j < len(self.c_extended) else Fraction(0)
+            delta[j] = s - c_j
+        self.delta = delta
+        return delta
+
     def _find_entering_variable(self) -> Optional[int]:
         """
-        Знаходить змінну для введення в базис.
-        Вибираємо стовпець з найбільшим позитивним коефіцієнтом в рядку цільової функції
-        (для максимізації).
-        
-        Returns:
-            Індекс змінної або None, якщо розв'язок оптимальний.
+        Знаходить змінну для введення в базис за правилом: вибираємо стовпець з
+        найбільш від'ємним значенням Δ (по модулю — тобто найменше значення Δ).
+        Повертає None якщо всі Δ_j >= 0 (оптимум).
         """
-        objective_row = self.tableau[-1]
-        max_coeff = Fraction(0)
+        delta = self._compute_delta()
         entering = None
-        
-        # Шукаємо найбільший позитивний коефіцієнт (стовпець останній не враховуємо)
-        for j in range(len(objective_row) - 1):
-            if objective_row[j] > max_coeff:
-                max_coeff = objective_row[j]
+        min_val = Fraction(0)
+        # Перебираємо всі стовпці окрім індексу за замовчуванням (але включаючи RHS для правила)
+        for j in range(len(delta) - 0):
+            if delta[j] < min_val:
+                min_val = delta[j]
                 entering = j
-        
         return entering
-    
+
     def _find_leaving_variable(self, entering: int) -> Optional[int]:
         """
         Знаходить змінну для виведення з базису за правилом мінімального відношення.
-        
-        Args:
-            entering: індекс змінної що входить в базис
-            
-        Returns:
-            Індекс рядка (базисної змінної) або None, якщо проблема необмежена.
         """
         min_ratio = None
         leaving_row = None
-        
         for i in range(self.m):
-            if self.tableau[i][entering] > 0:
-                ratio = self.tableau[i][-1] / self.tableau[i][entering]
+            coeff = self.tableau[i][entering]
+            if coeff > 0:
+                ratio = self.tableau[i][-1] / coeff
                 if min_ratio is None or ratio < min_ratio:
                     min_ratio = ratio
                     leaving_row = i
-        
         if leaving_row is None:
             raise ValueError("Задача необмежена (необмежений розв'язок)")
-        
         return leaving_row
-    
+
     def _pivot(self, entering: int, leaving_row: int):
         """
-        Виконує крок симплекс-методу (поворот таблиці).
-        
-        Args:
-            entering: індекс стовпця для введення
-            leaving_row: індекс рядка для виведення
+        Виконує крок симплекс-методу (поворот таблиці) і оновлює C_b відповідно до нового базису.
         """
         pivot_element = self.tableau[leaving_row][entering]
-        
         # Нормалізуємо рядок з розв'язуючим елементом
-        for j in range(len(self.tableau[leaving_row])):
+        row_len = len(self.tableau[leaving_row])
+        for j in range(row_len):
             self.tableau[leaving_row][j] /= pivot_element
-        
         # Приводимо всі інші рядки
-        for i in range(len(self.tableau)):
+        for i in range(self.m):
             if i != leaving_row:
                 factor = self.tableau[i][entering]
-                for j in range(len(self.tableau[i])):
+                for j in range(row_len):
                     self.tableau[i][j] -= factor * self.tableau[leaving_row][j]
-        
-        # Оновлюємо базис
+        # Оновлюємо базис і C_b
         old_basis_var = self.basis[leaving_row]
         self.basis[leaving_row] = entering
-        self.non_basis.remove(entering)
+        # Оновлюємо C_b для нової базисної змінної
+        new_Cb = self.c_extended[entering] if entering < len(self.c_extended) else Fraction(0)
+        self.C_b[leaving_row] = new_Cb
+        # Оновлюємо списки небазисних змінних
+        if entering in self.non_basis:
+            self.non_basis.remove(entering)
         self.non_basis.append(old_basis_var)
-    
+        # Після повороту індексний рядок буде оновлено при наступному обчисленні
+        self.delta = None
+
     def solve(self) -> Dict:
         """
         Розв'язує задачу лінійного програмування методом симплекс.
-        
-        Returns:
-            Словник з результатами:
-            - 'status': 'optimal', 'unbounded', або 'error'
-            - 'x': оптимальне рішення (список значень для оригінальних змінних)
-            - 'objective_value': оптимальне значення цільової функції
-            - 'iterations': кількість ітерацій симплекс-методу
-            - 'all_variables': значення всіх змінних (включаючи слабкі)
+        Реалізовано згідно з академічною методикою: індексний рядок Δ обчислюється
+        як Δ_j = sum(C_b[i] * tableau[i][j]) - c_j; умова оптимальності — всі Δ_j >= 0.
         """
-        # Додаємо слабкі змінни
+        # Додаємо слабкі змінні і підготуємо структури
         self._add_slack_variables()
-        
-        max_iterations = 10000  # Захист від нескінченного циклу
-        
+        max_iterations = 10000
         while True:
             self.iterations += 1
-            
             if self.iterations > max_iterations:
-                return {
-                    'status': 'error',
-                    'message': f'Перевищена максимальна кількість ітерацій ({max_iterations})',
-                    'iterations': self.iterations
-                }
-            
-            # Знаходимо змінну для введення
-            entering = self._find_entering_variable()
-            
-            # Якщо немає від'ємних коефіцієнтів - знайшли оптимум
+                return {'status': 'error', 'message': f'Перевищена максимальна кількість ітерацій ({max_iterations})', 'iterations': self.iterations}
+            # Обчислюємо індексний рядок
+            delta = self._compute_delta()
+            # Критерій оптимальності: всі Δ_j >= 0
+            entering = None
+            min_delta = Fraction(0)
+            for j, val in enumerate(delta):
+                if val < min_delta:
+                    min_delta = val
+                    entering = j
             if entering is None:
                 break
-            
-            # Знаходимо змінну для виведення
+            # Знаходимо вихідну змінну
             try:
                 leaving_row = self._find_leaving_variable(entering)
             except ValueError as e:
-                return {
-                    'status': 'unbounded',
-                    'message': str(e),
-                    'iterations': self.iterations
-                }
-            
-            # Виконуємо крок симплекс-методу
+                return {'status': 'unbounded', 'message': str(e), 'iterations': self.iterations}
+            # Повертаємо таблицю
             self._pivot(entering, leaving_row)
-        
-        # Вилучаємо розв'язок
-        self.optimal_value = -self.tableau[-1][-1]  # Таблиця зберігає -z, тому беремо з протилежним знаком
-        
+        # Після оптимізації обчислюємо значення цільової функції: z = sum(C_b[i] * RHS_i)
+        z = Fraction(0)
+        for i in range(self.m):
+            z += self.C_b[i] * self.tableau[i][-1]
+        self.optimal_value = z
         # Розв'язок для всіх змінних
         all_vars = [Fraction(0)] * (self.n + self.m)
         for i, basis_var in enumerate(self.basis):
             all_vars[basis_var] = self.tableau[i][-1]
-        
-        # Вилучаємо значення оригінальних змінних (без слабких)
         self.solution = all_vars[:self.n]
-        
-        return {
-            'status': 'optimal',
-            'x': self.solution,
-            'objective_value': self.optimal_value,
-            'iterations': self.iterations,
-            'all_variables': all_vars
-        }
-    
+        return {'status': 'optimal', 'x': self.solution, 'objective_value': self.optimal_value, 'iterations': self.iterations, 'all_variables': all_vars}
+
     def get_solution_as_float(self) -> Dict:
         """Повертає розв'язок з float значеннями для зручності."""
         if self.solution is None:
             return None
-        
-        return {
-            'status': 'optimal',
-            'x': [float(val) for val in self.solution],
-            'objective_value': float(self.optimal_value),
-            'iterations': self.iterations
-        }
-    
+        return {'status': 'optimal', 'x': [float(val) for val in self.solution], 'objective_value': float(self.optimal_value), 'iterations': self.iterations}
+
     def get_solution_as_fraction(self) -> Dict:
         """Повертає розв'язок з Fraction значеннями (точні значення)."""
         if self.solution is None:
             return None
-        
-        return {
-            'status': 'optimal',
-            'x': self.solution,
-            'objective_value': self.optimal_value,
-            'iterations': self.iterations
-        }
-    
+        return {'status': 'optimal', 'x': self.solution, 'objective_value': self.optimal_value, 'iterations': self.iterations}
+
     def print_tableau(self):
-        """Виводить поточну симплекс-таблицю."""
+        """Виводить поточну симплекс-таблицю у форматі академічної методики.
+
+        Виводить стовпець C_b, назви змінних (x1..xn та слабкі x_{n+1}..), матрицю коефіцієнтів,
+        RHS (A0) та нижній рядок оцінок Δ.
+        """
         if self.tableau is None:
             print("Таблиця ще не ініціалізована. Спершу викличте solve().")
             return
-        
-        print("\nСимплекс-таблиця:")
-        print("=" * 80)
-        
         # Заголовок
-        header = "Базис | "
+        var_names = []
         for j in range(self.n + self.m):
             if j < self.n:
-                header += f"x_{j+1:2d}     | "
+                var_names.append(f"x_{j+1}")
             else:
-                header += f"s_{j-self.n+1:2d}     | "
-        header += "RHS"
-        print(header)
-        print("-" * 80)
-        
-        # Рядки таблиці
+                var_names.append(f"x_{j+1}")  # слабкі як продовження нумерації
+        var_names.append("A0")  # RHS
+        # Обчислюємо індексний рядок перед виводом
+        delta = self._compute_delta()
+        # Друкуємо таблицю
+        col_width = 10
+        sep = " | "
+        # Header line
+        header = f"{'C_b':>{col_width}}{sep}{'Basis':>{col_width}}"
+        for name in var_names:
+            header += f"{sep}{name:>{col_width}}"
+        print("\n" + header)
+        print('-' * len(header))
+        # Rows
         for i in range(self.m):
+            cb = str(self.C_b[i])
             basis_var = self.basis[i]
             if basis_var < self.n:
                 basis_name = f"x_{basis_var+1}"
             else:
-                basis_name = f"s_{basis_var-self.n+1}"
-            
-            row_str = f"{basis_name:6s}| "
-            for j in range(self.n + self.m):
-                row_str += f"{str(self.tableau[i][j]):8s}| "
-            row_str += str(self.tableau[i][-1])
-            print(row_str)
-        
-        # Рядок цільової функції
-        print("-" * 80)
-        row_str = "z     | "
-        for j in range(self.n + self.m):
-            row_str += f"{str(self.tableau[-1][j]):8s}| "
-        row_str += str(self.tableau[-1][-1])
-        print(row_str)
-        print("=" * 80)
+                basis_name = f"x_{basis_var+1}"
+            row = f"{cb:>{col_width}}{sep}{basis_name:>{col_width}}"
+            for j in range(self.n + self.m + 1):
+                row += f"{sep}{str(self.tableau[i][j]):>{col_width}}"
+            print(row)
+        # Footer: Delta row and objective value
+        print('-' * len(header))
+        delta_row = f"{'':>{col_width}}{sep}{'Δ':>{col_width}}"
+        for j in range(self.n + self.m + 1):
+            delta_row += f"{sep}{str(delta[j]):>{col_width}}"
+        print(delta_row)
+        # Objective value (right-bottom corner) — z = sum(C_b * RHS)
+        z = sum(self.C_b[i] * self.tableau[i][-1] for i in range(self.m))
+        print(f"\nObjective z = {z}")
+        print('=' * len(header))
 
 
 # Приклади використання

@@ -108,9 +108,9 @@ class TestSimplexSolver(unittest.TestCase):
         solver = SimplexSolver(A, b, c)
         solver._add_slack_variables()
         
-        # Матриця має розмір (m+1) x (n+m+1)
-        # m=2, n=2, отже (3) x (5)
-        self.assertEqual(len(solver.tableau), 3)  # 2 обмеження + 1 рядок z
+        # Матриця має розмір (m) x (n+m+1) (ми більше не зберігаємо окремого рядка z)
+        # m=2, n=2, отже (2) x (5)
+        self.assertEqual(len(solver.tableau), 2)  # 2 обмеження
         self.assertEqual(len(solver.tableau[0]), 5)  # 2 оригінальні + 2 слабкі + 1 RHS
     
     def test_fractions_precision(self):
