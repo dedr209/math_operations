@@ -5,7 +5,7 @@
 """
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox, filedialog
 from fractions import Fraction
 from simplex_solver import SimplexSolver
 
@@ -69,6 +69,8 @@ class SimplexGUI:
         clear_btn.grid(row=0, column=1, padx=4)
         load_btn = ttk.Button(btn_frame, text='Завантажити тестовий варіант', command=self.load_test)
         load_btn.grid(row=0, column=2, padx=4)
+        save_btn = ttk.Button(btn_frame, text='Зберегти звіт у файл', command=self.save_report)
+        save_btn.grid(row=0, column=3, padx=4)
 
         # Текстове поле для виводу з прокруткою
         out_frame = ttk.Frame(self.root)
@@ -88,18 +90,22 @@ class SimplexGUI:
         self.text.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
     def _parse_fraction(self, s: str) -> Fraction:
+        """Парсить рядок у Fraction. Кидає ValueError якщо рядок некоректний.
+
+        Підтримує випадки 'a/b', десяткові, та коми як роздільник дробової частини.
+        """
+        if s is None:
+            raise ValueError('Порожнє значення')
         s = s.strip().replace(',', '.')  # Безпечна заміна коми на крапку
-        if s == '' or s.lower() == '0' or s == '0.0':
-            return Fraction(0)
+        if s == '':
+            raise ValueError('Порожнє значення')
         try:
-            # Try Fraction directly (handles '3/2')
             return Fraction(s)
         except Exception:
             try:
-                # Fallback: float then Fraction
                 return Fraction(float(s))
             except Exception:
-                return Fraction(0)
+                raise ValueError(f"Некоректне число: {s}")
 
     def on_clear(self):
         self.text.delete('1.0', tk.END)
@@ -107,6 +113,23 @@ class SimplexGUI:
     def append_text(self, txt: str):
         self.text.insert(tk.END, txt + "\n")
         self.text.see(tk.END)
+
+    def save_report(self):
+        """Зберегти вміст текстового поля у файл .txt або .doc"""
+        content = self.text.get('1.0', tk.END).strip()
+        if not content:
+            messagebox.showinfo("Збереження", "Немає даних для збереження.")
+            return
+        filetypes = [('Text files', '*.txt'), ('Word documents', '*.doc'), ('All files', '*.*')]
+        filename = filedialog.asksaveasfilename(defaultextension='.txt', filetypes=filetypes)
+        if not filename:
+            return
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(content)
+            messagebox.showinfo('Збережено', f'Звіт збережено у {filename}')
+        except Exception as e:
+            messagebox.showerror('Помилка при збереженні', str(e))
 
     def load_test(self):
         """Заповнює поля тестовим варіантом задачі."""
@@ -131,18 +154,22 @@ class SimplexGUI:
             self.entries_b[i].insert(0, str(b_vals[i]))
 
     def on_calculate(self):
-        # Читання матриці A
-        A = []
-        for i in range(self.m):
-            row = []
-            for j in range(self.n):
-                val = self.entries_A[i][j].get()
-                row.append(self._parse_fraction(val))
-            A.append(row)
-        # Читання b
-        b = [self._parse_fraction(e.get()) for e in self.entries_b]
-        # Читання c
-        c = [self._parse_fraction(e.get()) for e in self.entries_c]
+        try:
+            # Читання матриці A
+            A = []
+            for i in range(self.m):
+                row = []
+                for j in range(self.n):
+                    val = self.entries_A[i][j].get()
+                    row.append(self._parse_fraction(val))
+                A.append(row)
+            # Читання b
+            b = [self._parse_fraction(e.get()) for e in self.entries_b]
+            # Читання c
+            c = [self._parse_fraction(e.get()) for e in self.entries_c]
+        except ValueError as ex:
+            messagebox.showerror("Помилка введення", f"Некоректне значення у полях вводу: {ex}")
+            return
 
         # Створюємо розв'язувач
         solver = SimplexSolver(A, b, c)
