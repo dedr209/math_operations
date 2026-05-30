@@ -187,15 +187,7 @@ class SimplexSolver:
                     self.signs[i] = '<='
                 # якщо рівність — залишаємо як є
 
-        # 3) Нормалізація обмежень: перетворюємо усі ">=" у "<=" множенням на -1
-        for i, s in enumerate(self.signs):
-            if s == '>=':
-                # помножимо рядок на -1: A[i] та b[i]
-                self.A_original[i] = [ -a for a in self.A_original[i] ]
-                self.b[i] = -self.b[i]
-                self.signs[i] = '<='
-
-        # Рівності '=' допускаються — будуть оброблені як додавання штучної змінної у _add_slack_variables
+        # Рівності та >= будуть оброблені під час формування початкової таблиці (_add_slack_variables).
 
         # Перевірка коректності вхідних даних
         if len(self.b) != self.m:
@@ -212,12 +204,12 @@ class SimplexSolver:
         self.iterations = 0
         
     def _add_slack_variables(self):
-        """Додає вільні/надлишкові/штучні змінні відповідно до signs і формує початкову таблицю.
+        """Додає додаткові та штучні змінні відповідно до signs і формує початкову таблицю.
 
         Логіка (послідовно по рядках):
-         - '<=' : додається один slack ( +1 ) — потрапляє в базис
-         - '>=' : додається surplus ( -1 ) та штучна ( +1 ) — штучна в базисі
-         - '='  : додається штучна ( +1 ) — штучна в базисі
+         - '<=' : додається додаткова змінна (+1) — вона може стати базисною
+         - '>=' : додається від'ємна змінна (-1) та штучна змінна (+1) — штучна може стати базисною
+         - '='  : додається штучна змінна (+1) — штучна може стати базисною
 
         Штучні змінні отримують штраф у цільовій функції як -M (для максимізації),
         тобто c_artificial = MValue(0, -1).
@@ -274,7 +266,7 @@ class SimplexSolver:
                 c_list.append(MValue.zero())
         self.c_extended = c_list
 
-        # Ініціалізуємо базис: для slack — ті колонки, для artificial — вони потрапляють у базис
+        # Ініціалізуємо базис: для доданих змінних, відповідні одиничні стовпці потрапляють у базис
         basis = []
         C_b = []
         non_basis = list(range(self.n))
@@ -289,8 +281,7 @@ class SimplexSolver:
                     found_basis = col_idx
                     break
             if found_basis is None:
-                # ні одиничної колонки — задача потребує штучної змінної (має бути вже додана)
-                # знайдемо artificial у рядку
+                # ні одиничної колонки — знайдемо artificial у рядку якщо вона є
                 for (col_idx, coeff) in col_ops[i]:
                     if col_idx in artificial_cols:
                         found_basis = col_idx
@@ -655,15 +646,14 @@ class SimplexSolver:
         primal = list(self.solution[:5]) + [Fraction(0)] * max(0, 5 - len(self.solution))
         # F_max — оптимальне значення цільової функції
         F_max = self.optimal_value
-        # Dual variables y: беремо Δ під початковими вільними змінними
+        # Dual variables y: беремо Δ під початковими додатковими змінними
         # Обчислюємо Δ для поточної таблиці
         delta = self._compute_delta()
-        # початкові вільні змінні мали індекси n..n+m-1
+        # початкові додаткові змінні мали індекси n..n+added-1
         dual = []
-        for i in range(4):
-            # Додаємо лише ті dual-значення, що відповідають початковим вільним змінним
-            if i < self.m:
-                idx = self.n + i
+        for i in range(self.m):
+            idx = self.n + i
+            if idx < len(delta):
                 dual.append(delta[idx])
             else:
                 dual.append(Fraction(0))
