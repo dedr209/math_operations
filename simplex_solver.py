@@ -195,9 +195,7 @@ class SimplexSolver:
                 self.b[i] = -self.b[i]
                 self.signs[i] = '<='
 
-        # Наразі рівності '=' ще не підтримуються (потрібні штучні змінні / двофазний метод)
-        if any(s == '=' for s in self.signs):
-            raise NotImplementedError("Рівняння ('=') наразі не підтримуються без штучного базису")
+        # Рівності '=' допускаються — будуть оброблені як додавання штучної змінної у _add_slack_variables
 
         # Перевірка коректності вхідних даних
         if len(self.b) != self.m:
@@ -214,31 +212,106 @@ class SimplexSolver:
         self.iterations = 0
         
     def _add_slack_variables(self):
-        """Додає вільні змінні для перетворення нерівностей <= у рівняння.
+        """Додає вільні/надлишкові/штучні змінні відповідно до signs і формує початкову таблицю.
 
-        Підбирає розширену таблицю без додаткового рядка цільової функії.
-        Ініціалізує вектор C_b (коефіцієнти цільової функції для базисних змінних)
-        та розширений вектор коефіцієнтів цільової функції c_extended.
+        Логіка (послідовно по рядках):
+         - '<=' : додається один slack ( +1 ) — потрапляє в базис
+         - '>=' : додається surplus ( -1 ) та штучна ( +1 ) — штучна в базисі
+         - '='  : додається штучна ( +1 ) — штучна в базисі
+
+        Штучні змінні отримують штраф у цільовій функції як -M (для максимізації),
+        тобто c_artificial = MValue(0, -1).
         """
-        # Розширена матриця: [A | I | b] (I - одиничні вектори для вільних змінних)
+        # Підрахуємо, які додаткові стовпці потрібні та розподілимо їх по рядках
+        col_ops = [[] for _ in range(self.m)]  # для кожного рядка — список (col_idx, coeff)
+        next_col = self.n
+        artificial_cols = []
+        slack_cols = []
+        surplus_cols = []
+        for i in range(self.m):
+            s = self.signs[i]
+            if s == '<=':
+                # додати slack
+                col_ops[i].append((next_col, Fraction(1)))
+                slack_cols.append(next_col)
+                next_col += 1
+            elif s == '>=':
+                # surplus then artificial
+                col_ops[i].append((next_col, Fraction(-1)))
+                surplus_cols.append(next_col)
+                next_col += 1
+                col_ops[i].append((next_col, Fraction(1)))
+                artificial_cols.append(next_col)
+                next_col += 1
+            elif s == '=':
+                # artificial only
+                col_ops[i].append((next_col, Fraction(1)))
+                artificial_cols.append(next_col)
+                next_col += 1
+            else:
+                raise ValueError(f"Непідтримуваний знак під час побудови таблиці: {s}")
+
+        total_added = next_col - self.n
+        self.total_vars = self.n + total_added
+
+        # Побудуємо tableau: кожний рядок = A[i] + zeros(added) + [b_i], потім встановимо коефіцієнти доданих стовпців
         self.tableau = []
         for i in range(self.m):
-            row = self.A_original[i][:] + [Fraction(0)] * self.m + [self.b[i]]
-            # Додаємо одиничну матрицю для вільних змінних
-            row[self.n + i] = Fraction(1)
+            row = self.A_original[i][:] + [Fraction(0)] * total_added + [self.b[i]]
+            for (col_idx, coeff) in col_ops[i]:
+                # перетворимо глобальний індекс col_idx на позицію у розширеному векторі
+                row[col_idx] = coeff
             self.tableau.append(row)
 
-        # Розширений вектор коефіцієнтів цільової функії: c для основних змінних + 0 для вільних
-        # Використовуємо MValue для можливого наявного штрафу M
-        self.c_extended = [MValue(val, 0) for val in self.c_original] + [MValue.zero() for _ in range(self.m)]
+        # Побудуємо c_extended як MValue: основні змінні з c_original, додаткові — 0 або -M для штучних
+        c_list = [MValue(val, 0) for val in self.c_original]
+        # Додаткові колонки за порядком індексації next_col вищому: від self.n до self.total_vars-1
+        for col in range(self.n, self.total_vars):
+            if col in artificial_cols:
+                # штраф -M для максимізації
+                c_list.append(MValue(0, -1))
+            else:
+                c_list.append(MValue.zero())
+        self.c_extended = c_list
 
-        # Ініціалізуємо вектор C_b (коефіцієнти цільової функції для базисних змінних)
-        # Спочатку в базисі вільні змінні з нульовими коефіцієнтами
-        self.C_b = [MValue.zero() for _ in range(self.m)]
+        # Ініціалізуємо базис: для slack — ті колонки, для artificial — вони потрапляють у базис
+        basis = []
+        C_b = []
+        non_basis = list(range(self.n))
+        for i in range(self.m):
+            # знайдемо, яка колонка є одиничною в цьому рядку — базисна
+            found_basis = None
+            for (col_idx, coeff) in col_ops[i]:
+                if coeff == 1 and col_idx in artificial_cols:
+                    found_basis = col_idx
+                    break
+                if coeff == 1 and col_idx in slack_cols:
+                    found_basis = col_idx
+                    break
+            if found_basis is None:
+                # ні одиничної колонки — задача потребує штучної змінної (має бути вже додана)
+                # знайдемо artificial у рядку
+                for (col_idx, coeff) in col_ops[i]:
+                    if col_idx in artificial_cols:
+                        found_basis = col_idx
+                        break
+            if found_basis is None:
+                # як резерв — просто взяти перший доданий стовпець
+                if col_ops[i]:
+                    found_basis = col_ops[i][0][0]
+            basis.append(found_basis)
+            # C_b — коефіцієнт цілі для базисної змінної
+            if found_basis in artificial_cols:
+                C_b.append(MValue(0, -1))
+            else:
+                C_b.append(MValue.zero())
+            # якщо базисна змінна вже була у non_basis — видалимо
+            if found_basis in non_basis:
+                non_basis.remove(found_basis)
 
-        # Ініціалізуємо базисні та небазисні змінні
-        self.basis = list(range(self.n, self.n + self.m))
-        self.non_basis = list(range(self.n))
+        self.basis = basis
+        self.non_basis = non_basis
+        self.C_b = C_b
 
         # Індексний рядок (Delta) ще не обчислено
         self.delta = None
@@ -267,15 +340,16 @@ class SimplexSolver:
         if delta is None:
             delta = self._compute_delta()
         # Перевіряємо тільки стовпці змінних (не включаємо RHS/A0)
-        for j in range(self.n + self.m):
-            if delta[j] < 0:
+        zero = MValue.zero()
+        for j in range(self.total_vars):
+            if delta[j] < zero:
                 return False
         return True
 
     def _compute_delta(self):
         """Обчислює індексний рядок Δ_j = sum_i C_b[i] * tableau[i][j] - c_j для всіх стовпців,
         включаючи стовпець вільних членів (RHS / A0). Повертає список MValue."""
-        num_cols = self.n + self.m + 1  # останній стовпець - RHS (A0)
+        num_cols = self.total_vars + 1  # останній стовпець - RHS (A0)
         delta = [MValue.zero() for _ in range(num_cols)]
         for j in range(num_cols):
             s = MValue.zero()
@@ -295,9 +369,9 @@ class SimplexSolver:
         """
         delta = self._compute_delta()
         entering = None
-        min_val = Fraction(0)
+        min_val = MValue.zero()
         # Перебираємо всі стовпці змінних (без стовпця RHS/A0)
-        for j in range(self.n + self.m):
+        for j in range(self.total_vars):
             if delta[j] < min_val:
                 min_val = delta[j]
                 entering = j
@@ -371,8 +445,8 @@ class SimplexSolver:
             return {'status': 'optimal', 'entering': None, 'leaving_row': None, 'tableau': formatted}
         # Вибираємо напрямний стовпець: найменше (найбільш від'ємне) значення Δ серед змінних
         entering = None
-        min_delta = Fraction(0)
-        for j in range(self.n + self.m):
+        min_delta = MValue.zero()
+        for j in range(self.total_vars):
             if delta[j] < min_delta:
                 min_delta = delta[j]
                 entering = j
@@ -425,9 +499,9 @@ class SimplexSolver:
             delta = self._compute_delta()
             # Критерій оптимальності: всі Δ_j >= 0
             entering = None
-            min_delta = Fraction(0)
+            min_delta = MValue.zero()
             # Перебираємо тільки змінні (не включаємо стовпець RHS/A0)
-            for j in range(self.n + self.m):
+            for j in range(self.total_vars):
                 val = delta[j]
                 if val < min_delta:
                     min_delta = val
@@ -447,7 +521,7 @@ class SimplexSolver:
             z = z + (self.C_b[i] * self.tableau[i][-1])
         self.optimal_value = z
         # Розв'язок для всіх змінних
-        all_vars = [Fraction(0)] * (self.n + self.m)
+        all_vars = [Fraction(0)] * self.total_vars
         for i, basis_var in enumerate(self.basis):
             all_vars[basis_var] = self.tableau[i][-1]
         self.solution = all_vars[:self.n]
@@ -527,7 +601,7 @@ class SimplexSolver:
         if self.tableau is None:
             return "Таблиця ще не ініціалізована. Спершу викличте build_initial_tableau() або solve()."
         # Імена змінних
-        var_names = [f"x_{j+1}" for j in range(self.n + self.m)] + ["A0"]
+        var_names = [f"x_{j+1}" for j in range(self.total_vars)] + ["A0"]
         # Обчислюємо Δ
         delta = self._compute_delta()
         # Підготуємо матрицю рядків як списки рядків
@@ -540,11 +614,11 @@ class SimplexSolver:
             basis_var = self.basis[i]
             basis_name = f"x_{basis_var+1}"
             row = [cb, basis_name]
-            for j in range(self.n + self.m + 1):
+            for j in range(self.total_vars + 1):
                 row.append(self._frac_to_str(self.tableau[i][j]))
             rows.append(row)
         # Додаємо Δ рядок
-        delta_row = ["", "Δ"] + [self._frac_to_str(delta[j]) for j in range(self.n + self.m)] + [self._frac_to_str(delta[self.n + self.m])]
+        delta_row = ["", "Δ"] + [self._frac_to_str(delta[j]) for j in range(self.total_vars)] + [self._frac_to_str(delta[self.total_vars])]
         rows.append(delta_row)
         # Визначаємо ширину колонок
         col_widths = [max(len(r[col]) for r in rows) for col in range(len(header))]
