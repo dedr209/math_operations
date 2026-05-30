@@ -201,7 +201,7 @@ class SimplexSolver:
         delta = self._compute_delta()
         # Перевіряємо оптимальність
         if self.is_optimal(delta):
-            formatted = self.format_tableau(return_str=True)
+            formatted = self.format_tableau()
             if verbose:
                 print(formatted)
             return {'status': 'optimal', 'entering': None, 'leaving_row': None, 'tableau': formatted}
@@ -214,7 +214,7 @@ class SimplexSolver:
                 entering = j
         # Якщо entering не знайдений (мабуть через числові нюанси) — вважаємо оптимум
         if entering is None:
-            formatted = self.format_tableau(return_str=True)
+            formatted = self.format_tableau()
             if verbose:
                 print(formatted)
             return {'status': 'optimal', 'entering': None, 'leaving_row': None, 'tableau': formatted}
@@ -229,16 +229,20 @@ class SimplexSolver:
                     min_ratio = theta
                     leaving_row = i
         if leaving_row is None:
-            formatted = self.format_tableau(return_str=True)
+            formatted = self.format_tableau()
             if verbose:
                 print(formatted)
             return {'status': 'unbounded', 'entering': entering, 'leaving_row': None, 'tableau': formatted}
+
+        # Запам'ятовуємо назву змінної, що виходить з базису, ДО виконання повороту
+        leaving_var_idx = self.basis[leaving_row]
+
         # Виконуємо поворот (Jordan-Gauss)
         self._pivot(entering, leaving_row)
-        formatted = self.format_tableau(return_str=True)
+        formatted = self.format_tableau()
         if verbose:
             print(formatted)
-        return {'status': 'continue', 'entering': entering, 'leaving_row': leaving_row, 'tableau': formatted}
+        return {'status': 'continue', 'entering': entering, 'leaving_row': leaving_row, 'leaving_var': leaving_var_idx, 'tableau': formatted}
 
     def solve(self) -> Dict:
         """

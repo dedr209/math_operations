@@ -88,7 +88,7 @@ class SimplexGUI:
         self.text.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
     def _parse_fraction(self, s: str) -> Fraction:
-        s = s.strip()
+        s = s.strip().replace(',', '.')  # Безпечна заміна коми на крапку
         if s == '' or s.lower() == '0' or s == '0.0':
             return Fraction(0)
         try:
@@ -165,7 +165,8 @@ class SimplexGUI:
             entering = res.get('entering')
             leaving = res.get('leaving_row')
             if status == 'continue':
-                self.append_text(f"Ітерація {it}: введено змінну x_{entering+1}, виведено базисний рядок {leaving+1}")
+                leaving_var = res.get('leaving_var')
+                self.append_text(f"Ітерація {it}: введено змінну x_{entering+1}, виведено з базису змінну x_{leaving_var+1}")
                 self.append_text(res.get('tableau') or solver.format_tableau())
                 continue
             elif status == 'unbounded':
