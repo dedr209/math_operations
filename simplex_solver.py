@@ -7,6 +7,117 @@ from fractions import Fraction
 from typing import List, Tuple, Optional, Dict
 
 
+class MValue:
+    """
+    Symbolic value representing a + b*M, where a and b are Fractions and M is a symbolic
+    infinitely large positive constant used for Big M penalty.
+
+    Comparisons treat M as positive infinity (i.e., b dominates a).
+    Only limited arithmetic is supported: addition/subtraction with MValue or Fraction,
+    multiplication/division by Fractions. Multiplication of two MValues both having
+    non-zero M-part is not supported (would produce M^2 terms).
+    """
+    def __init__(self, a=0, m=0):
+        self.a = Fraction(a)
+        self.m = Fraction(m)
+
+    @classmethod
+    def zero(cls):
+        return cls(0, 0)
+
+    def copy(self):
+        return MValue(self.a, self.m)
+
+    def __add__(self, other):
+        if isinstance(other, MValue):
+            return MValue(self.a + other.a, self.m + other.m)
+        else:
+            return MValue(self.a + Fraction(other), self.m)
+
+    __radd__ = __add__
+
+    def __neg__(self):
+        return MValue(-self.a, -self.m)
+
+    def __sub__(self, other):
+        if isinstance(other, MValue):
+            return MValue(self.a - other.a, self.m - other.m)
+        else:
+            return MValue(self.a - Fraction(other), self.m)
+
+    def __rsub__(self, other):
+        # other - self
+        if isinstance(other, MValue):
+            return other.__sub__(self)
+        else:
+            return MValue(Fraction(other) - self.a, -self.m)
+
+    def __mul__(self, other):
+        # Support multiplication by Fraction/int or by MValue when one side has zero M-part
+        if isinstance(other, MValue):
+            if self.m != 0 and other.m != 0:
+                raise NotImplementedError("Multiplication producing M^2 is not supported")
+            # (a1 + b1 M)*(a2 + b2 M) -> a1*a2 + (a1*b2 + a2*b1) M
+            a = self.a * other.a
+            m = self.a * other.m + other.a * self.m
+            return MValue(a, m)
+        else:
+            f = Fraction(other)
+            return MValue(self.a * f, self.m * f)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __truediv__(self, other):
+        # Only support division by scalar Fractions/ints
+        if isinstance(other, MValue):
+            raise NotImplementedError("Division by MValue is not supported")
+        f = Fraction(other)
+        return MValue(self.a / f, self.m / f)
+
+    def __eq__(self, other):
+        if isinstance(other, MValue):
+            return self.m == other.m and self.a == other.a
+        else:
+            return self.m == 0 and self.a == Fraction(other)
+
+    def _cmp_key(self):
+        # For comparisons: M-part dominates (treated as infinity). Compare m first,
+        # then a.
+        return (self.m, self.a)
+
+    def __lt__(self, other):
+        if not isinstance(other, MValue):
+            other = MValue(Fraction(other), 0)
+        # Compare m first
+        if self.m != other.m:
+            return self.m < other.m
+        return self.a < other.a
+
+    def __le__(self, other):
+        return self == other or self < other
+
+    def __gt__(self, other):
+        return not self.__le__(other)
+
+    def __ge__(self, other):
+        return not self.__lt__(other)
+
+    def __repr__(self):
+        return f"MValue(a={self.a}, m={self.m})"
+
+    def __str__(self):
+        parts = []
+        if self.a != 0:
+            parts.append(str(self.a))
+        if self.m != 0:
+            m_part = str(self.m) + "*M" if self.m != 1 else "M"
+            parts.append(m_part)
+        if not parts:
+            return "0"
+        return " + ".join(parts)
+
+
 class SimplexSolver:
     """
     Клас для розв'язання задач лінійного програмування методом симплекс.
@@ -20,7 +131,7 @@ class SimplexSolver:
     вільних змінних: A*x + s = b, де s >= 0 (вільні змінні).
     """
     
-    def __init__(self, A: List[List], b: List, c: List):
+    def __init__(self, A: List[List], b: List, c: List, signs: Optional[List[str]] = None, goal: str = 'max'):
         """
         Ініціалізація розв'язувача.
         
@@ -28,21 +139,72 @@ class SimplexSolver:
             A: матриця коефіцієнтів обмежень (m x n), де m - кількість обмежень, n - змінних
             b: вектор правих частин обмежень (довжина m)
             c: коефіцієнти цільової функції (довжина n)
+            signs: список знаків обмежень для кожного рядка ("<=", ">=", "="). Якщо None — припускається "<=" для всіх.
+            goal: тип оптимізації: 'max' (за замовчуванням) або 'min'
         """
         self.m = len(A)  # кількість обмежень
         self.n = len(A[0]) if A else 0  # кількість основних змінних
-        
+
         # Конвертуємо в Fraction для точних обчислень
         self.A_original = [[Fraction(A[i][j]) for j in range(self.n)] for i in range(self.m)]
         self.b = [Fraction(val) for val in b]
         self.c_original = [Fraction(val) for val in c]
-        
+
+        # Обробка додаткових параметрів: signs та goal
+        if signs is None:
+            self.signs = ['<='] * self.m
+        else:
+            if len(signs) != self.m:
+                raise ValueError(f"Розмір signs ({len(signs)}) не відповідає кількості рядків A ({self.m})")
+            # Нормалізація рядків знаків
+            normalized = []
+            for s in signs:
+                s_str = str(s).strip()
+                if s_str not in ('<=', '>=', '='):
+                    raise ValueError(f"Непідтримуваний знак обмеження: {s}")
+                normalized.append(s_str)
+            self.signs = normalized
+
+        if goal not in ('max', 'min'):
+            raise ValueError("goal має бути 'max' або 'min'")
+        self.goal = goal
+
+        # --- Канонізація перед основною логікою ---
+        # 1) Якщо це задача мінімізації — переведемо в макс шляхом інверсії c
+        if self.goal == 'min':
+            self.c_original = [ -val for val in self.c_original ]
+
+        # 2) Якщо b[i] < 0 — помножимо відповідний рядок на -1 і інвертуємо знак обмеження
+        for i in range(self.m):
+            if self.b[i] < 0:
+                # помножимо рядок і RHS на -1
+                self.A_original[i] = [ -a for a in self.A_original[i] ]
+                self.b[i] = -self.b[i]
+                # інвертуємо знак
+                if self.signs[i] == '<=':
+                    self.signs[i] = '>='
+                elif self.signs[i] == '>=':
+                    self.signs[i] = '<='
+                # якщо рівність — залишаємо як є
+
+        # 3) Нормалізація обмежень: перетворюємо усі ">=" у "<=" множенням на -1
+        for i, s in enumerate(self.signs):
+            if s == '>=':
+                # помножимо рядок на -1: A[i] та b[i]
+                self.A_original[i] = [ -a for a in self.A_original[i] ]
+                self.b[i] = -self.b[i]
+                self.signs[i] = '<='
+
+        # Наразі рівності '=' ще не підтримуються (потрібні штучні змінні / двофазний метод)
+        if any(s == '=' for s in self.signs):
+            raise NotImplementedError("Рівняння ('=') наразі не підтримуються без штучного базису")
+
         # Перевірка коректності вхідних даних
         if len(self.b) != self.m:
             raise ValueError(f"Розмір b ({len(self.b)}) не відповідає кількості рядків A ({self.m})")
         if len(self.c_original) != self.n:
             raise ValueError(f"Розмір c ({len(self.c_original)}) не відповідає кількості стовпців A ({self.n})")
-        
+
         # Розширена таблиця з додатковими змінними
         self.tableau = None
         self.basis = None
@@ -67,11 +229,12 @@ class SimplexSolver:
             self.tableau.append(row)
 
         # Розширений вектор коефіцієнтів цільової функії: c для основних змінних + 0 для вільних
-        self.c_extended = self.c_original[:] + [Fraction(0)] * self.m
+        # Використовуємо MValue для можливого наявного штрафу M
+        self.c_extended = [MValue(val, 0) for val in self.c_original] + [MValue.zero() for _ in range(self.m)]
 
         # Ініціалізуємо вектор C_b (коефіцієнти цільової функції для базисних змінних)
         # Спочатку в базисі вільні змінні з нульовими коефіцієнтами
-        self.C_b = [Fraction(0)] * self.m
+        self.C_b = [MValue.zero() for _ in range(self.m)]
 
         # Ініціалізуємо базисні та небазисні змінні
         self.basis = list(range(self.n, self.n + self.m))
@@ -111,14 +274,15 @@ class SimplexSolver:
 
     def _compute_delta(self):
         """Обчислює індексний рядок Δ_j = sum_i C_b[i] * tableau[i][j] - c_j для всіх стовпців,
-        включаючи стовпець вільних членів (RHS / A0)."""
+        включаючи стовпець вільних членів (RHS / A0). Повертає список MValue."""
         num_cols = self.n + self.m + 1  # останній стовпець - RHS (A0)
-        delta = [Fraction(0)] * num_cols
+        delta = [MValue.zero() for _ in range(num_cols)]
         for j in range(num_cols):
-            s = Fraction(0)
+            s = MValue.zero()
             for i in range(self.m):
-                s += self.C_b[i] * self.tableau[i][j]
-            c_j = self.c_extended[j] if j < len(self.c_extended) else Fraction(0)
+                # C_b[i] is MValue, tableau entries are Fraction -> MValue * Fraction
+                s = s + (self.C_b[i] * self.tableau[i][j])
+            c_j = self.c_extended[j] if j < len(self.c_extended) else MValue.zero()
             delta[j] = s - c_j
         self.delta = delta
         return delta
@@ -178,7 +342,7 @@ class SimplexSolver:
         old_basis_var = self.basis[leaving_row]
         self.basis[leaving_row] = entering
         # Оновлюємо C_b для нової базисної змінної
-        new_Cb = self.c_extended[entering] if entering < len(self.c_extended) else Fraction(0)
+        new_Cb = self.c_extended[entering] if entering < len(self.c_extended) else MValue.zero()
         self.C_b[leaving_row] = new_Cb
         # Оновлюємо списки небазисних змінних
         if entering in self.non_basis:
@@ -278,31 +442,76 @@ class SimplexSolver:
             # Повертаємо таблицю
             self._pivot(entering, leaving_row)
         # Після оптимізації обчислюємо значення цільової функції: z = sum(C_b[i] * RHS_i)
-        z = Fraction(0)
+        z = MValue.zero()
         for i in range(self.m):
-            z += self.C_b[i] * self.tableau[i][-1]
+            z = z + (self.C_b[i] * self.tableau[i][-1])
         self.optimal_value = z
         # Розв'язок для всіх змінних
         all_vars = [Fraction(0)] * (self.n + self.m)
         for i, basis_var in enumerate(self.basis):
             all_vars[basis_var] = self.tableau[i][-1]
         self.solution = all_vars[:self.n]
-        return {'status': 'optimal', 'x': self.solution, 'objective_value': self.optimal_value, 'iterations': self.iterations, 'all_variables': all_vars}
+        # Ensure backward compatibility: if optimal_value has no M-part, return Fraction
+        obj_ret = self.optimal_value
+        if isinstance(self.optimal_value, MValue) and self.optimal_value.m == 0:
+            obj_ret = self.optimal_value.a
+        return {'status': 'optimal', 'x': self.solution, 'objective_value': obj_ret, 'iterations': self.iterations, 'all_variables': all_vars}
 
     def get_solution_as_float(self) -> Dict:
         """Повертає розв'язок з float значеннями для зручності."""
         if self.solution is None:
             return None
-        return {'status': 'optimal', 'x': [float(val) for val in self.solution], 'objective_value': float(self.optimal_value), 'iterations': self.iterations}
+        # objective_value may be MValue; if M-part is zero, convert to float of a
+        if isinstance(self.optimal_value, MValue):
+            if self.optimal_value.m == 0:
+                obj = float(self.optimal_value.a)
+            else:
+                raise ValueError("objective contains symbolic M; cannot convert to float")
+        else:
+            obj = float(self.optimal_value)
+        return {'status': 'optimal', 'x': [float(val) for val in self.solution], 'objective_value': obj, 'iterations': self.iterations}
 
     def get_solution_as_fraction(self) -> Dict:
         """Повертає розв'язок з Fraction значеннями (точні значення)."""
         if self.solution is None:
             return None
-        return {'status': 'optimal', 'x': self.solution, 'objective_value': self.optimal_value, 'iterations': self.iterations}
+        # objective_value may be MValue; return as Fraction if possible
+        if isinstance(self.optimal_value, MValue):
+            if self.optimal_value.m == 0:
+                obj = self.optimal_value.a
+            else:
+                obj = self.optimal_value
+        else:
+            obj = self.optimal_value
+        return {'status': 'optimal', 'x': self.solution, 'objective_value': obj, 'iterations': self.iterations}
 
-    def _frac_to_str(self, f: Fraction) -> str:
-        """Повертає красиве представлення Fraction: ціле якщо знаменник 1 або 'num/den'."""
+    def _frac_to_str(self, f) -> str:
+        """Повертає красиве представлення Fraction або MValue.
+
+        Якщо f — MValue, повертає вираз 'a + b*M' або просто 'a' якщо M-частина нульова.
+        """
+        # MValue
+        if isinstance(f, MValue):
+            # Якщо немає частини M — виводимо тільки a як Fraction
+            if f.m == 0:
+                val = f.a
+                if val.denominator == 1:
+                    return str(val.numerator)
+                return f"{val.numerator}/{val.denominator}"
+            # Інакше формуємо рядок a + b*M
+            parts = []
+            if f.a != 0:
+                a = f.a
+                if a.denominator == 1:
+                    parts.append(str(a.numerator))
+                else:
+                    parts.append(f"{a.numerator}/{a.denominator}")
+            if f.m != 0:
+                m = f.m
+                m_str = str(m) + "*M" if m != 1 else "M"
+                parts.append(m_str)
+            return " + ".join(parts)
+        # Fraction-like
         if not isinstance(f, Fraction):
             f = Fraction(f)
         if f.denominator == 1:

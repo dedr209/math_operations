@@ -37,7 +37,7 @@ class SimplexGUI:
 
         # Поля матриці A
         for i in range(self.m):
-            ttk.Label(frm, text=f"r{i+1}").grid(row=2 + i, column= -1)  # not visible but for alignment
+            ttk.Label(frm, text=f"r{i+1}").grid(row=2 + i, column=self.n, sticky='e')
             for j in range(self.n):
                 e = ttk.Entry(frm, width=8)
                 e.grid(row=2 + i, column=j, padx=2, pady=2)
