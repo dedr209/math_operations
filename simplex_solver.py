@@ -62,7 +62,7 @@ class SimplexSolver:
         self.tableau = []
         for i in range(self.m):
             row = self.A_original[i][:] + [Fraction(0)] * self.m + [self.b[i]]
-            # Додаємо одиничну матрицю для слабких змінних
+            # Додаємо одиничну матрицю для вільних змінних
             row[self.n + i] = Fraction(1)
             self.tableau.append(row)
 
@@ -73,7 +73,7 @@ class SimplexSolver:
         # Спочатку в базисі вільні змінні з нульовими коефіцієнтами
         self.C_b = [Fraction(0)] * self.m
 
-        # Ініціалізуємо базові та небазові змінні
+        # Ініціалізуємо базисні та небазисні змінні
         self.basis = list(range(self.n, self.n + self.m))
         self.non_basis = list(range(self.n))
 
@@ -187,19 +187,24 @@ class SimplexSolver:
         # Після повороту індексний рядок буде обчислено знову при наступному виклику
         self.delta = None
 
-    def iterate(self) -> Dict:
+    def iterate(self, verbose: bool = False) -> Dict:
         """Виконує одну ітерацію симплекс-методу.
 
         Повертає словник з інформацією про крок:
          - 'status': 'continue', 'optimal', або 'unbounded'
          - 'entering': індекс стовпця що входить у базис (або None)
          - 'leaving_row': індекс рядка що виходить з базису (або None)
+         - 'tableau': (str) форматована таблиця після ітерації
+        Якщо verbose=True — таблиця буде надрукована в консоль.
         """
         # Обчислюємо індексний рядок
         delta = self._compute_delta()
         # Перевіряємо оптимальність
         if self.is_optimal(delta):
-            return {'status': 'optimal', 'entering': None, 'leaving_row': None}
+            formatted = self.format_tableau(return_str=True)
+            if verbose:
+                print(formatted)
+            return {'status': 'optimal', 'entering': None, 'leaving_row': None, 'tableau': formatted}
         # Вибираємо напрямний стовпець: найменше (найбільш від'ємне) значення Δ серед змінних
         entering = None
         min_delta = Fraction(0)
@@ -209,7 +214,10 @@ class SimplexSolver:
                 entering = j
         # Якщо entering не знайдений (мабуть через числові нюанси) — вважаємо оптимум
         if entering is None:
-            return {'status': 'optimal', 'entering': None, 'leaving_row': None}
+            formatted = self.format_tableau(return_str=True)
+            if verbose:
+                print(formatted)
+            return {'status': 'optimal', 'entering': None, 'leaving_row': None, 'tableau': formatted}
         # Шукаємо напрямний рядок за мінімальним позитивним симплекс-відношенням θ = RHS / a_ij
         min_ratio = None
         leaving_row = None
@@ -221,10 +229,16 @@ class SimplexSolver:
                     min_ratio = theta
                     leaving_row = i
         if leaving_row is None:
-            return {'status': 'unbounded', 'entering': entering, 'leaving_row': None}
+            formatted = self.format_tableau(return_str=True)
+            if verbose:
+                print(formatted)
+            return {'status': 'unbounded', 'entering': entering, 'leaving_row': None, 'tableau': formatted}
         # Виконуємо поворот (Jordan-Gauss)
         self._pivot(entering, leaving_row)
-        return {'status': 'continue', 'entering': entering, 'leaving_row': leaving_row}
+        formatted = self.format_tableau(return_str=True)
+        if verbose:
+            print(formatted)
+        return {'status': 'continue', 'entering': entering, 'leaving_row': leaving_row, 'tableau': formatted}
 
     def solve(self) -> Dict:
         """
@@ -283,56 +297,96 @@ class SimplexSolver:
             return None
         return {'status': 'optimal', 'x': self.solution, 'objective_value': self.optimal_value, 'iterations': self.iterations}
 
-    def print_tableau(self):
-        """Виводить поточну симплекс-таблицю у форматі академічної методики.
+    def _frac_to_str(self, f: Fraction) -> str:
+        """Повертає красиве представлення Fraction: ціле якщо знаменник 1 або 'num/den'."""
+        if not isinstance(f, Fraction):
+            f = Fraction(f)
+        if f.denominator == 1:
+            return str(f.numerator)
+        return f"{f.numerator}/{f.denominator}"
 
-        Виводить стовпець C_b, назви змінних (x1..xn та вільні x_{n+1}..), матрицю коефіцієнтів,
-        RHS (A0) та нижній рядок оцінок Δ.
+    def format_tableau(self) -> str:
+        """Повертає форматовану симплекс-таблицю як рядок.
+
+        Таблиця містить: C_b, назву базисної змінної, коефіцієнти при змінних,
+        стовпець RHS (A0) та індексний рядок Δ.
         """
         if self.tableau is None:
-            print("Таблиця ще не ініціалізована. Спершу викличте solve().")
-            return
-        # Заголовок
-        var_names = []
-        for j in range(self.n + self.m):
-            if j < self.n:
-                var_names.append(f"x_{j+1}")
-            else:
-                var_names.append(f"x_{j+1}")  # вільні як продовження нумерації
-        var_names.append("A0")  # RHS
-        # Обчислюємо індексний рядок перед виводом
+            return "Таблиця ще не ініціалізована. Спершу викличте build_initial_tableau() або solve()."
+        # Імена змінних
+        var_names = [f"x_{j+1}" for j in range(self.n + self.m)] + ["A0"]
+        # Обчислюємо Δ
         delta = self._compute_delta()
-        # Друкуємо таблицю
-        col_width = 10
-        sep = " | "
-        # Header line
-        header = f"{'C_b':>{col_width}}{sep}{'Basis':>{col_width}}"
-        for name in var_names:
-            header += f"{sep}{name:>{col_width}}"
-        print("\n" + header)
-        print('-' * len(header))
-        # Rows
+        # Підготуємо матрицю рядків як списки рядків
+        rows = []
+        header = ["C_b", "Basis"] + var_names
+        rows.append(header)
+        # Дані рядків
         for i in range(self.m):
-            cb = str(self.C_b[i])
+            cb = self._frac_to_str(self.C_b[i])
             basis_var = self.basis[i]
-            if basis_var < self.n:
-                basis_name = f"x_{basis_var+1}"
-            else:
-                basis_name = f"x_{basis_var+1}"
-            row = f"{cb:>{col_width}}{sep}{basis_name:>{col_width}}"
+            basis_name = f"x_{basis_var+1}"
+            row = [cb, basis_name]
             for j in range(self.n + self.m + 1):
-                row += f"{sep}{str(self.tableau[i][j]):>{col_width}}"
-            print(row)
-        # Footer: Delta row and objective value
-        print('-' * len(header))
-        delta_row = f"{'':>{col_width}}{sep}{'Δ':>{col_width}}"
-        for j in range(self.n + self.m + 1):
-            delta_row += f"{sep}{str(delta[j]):>{col_width}}"
-        print(delta_row)
-        # Objective value (right-bottom corner) — z = sum(C_b * RHS)
-        z = sum(self.C_b[i] * self.tableau[i][-1] for i in range(self.m))
-        print(f"\nObjective z = {z}")
-        print('=' * len(header))
+                row.append(self._frac_to_str(self.tableau[i][j]))
+            rows.append(row)
+        # Додаємо Δ рядок
+        delta_row = ["", "Δ"] + [self._frac_to_str(delta[j]) for j in range(self.n + self.m)] + [self._frac_to_str(delta[self.n + self.m])]
+        rows.append(delta_row)
+        # Визначаємо ширину колонок
+        col_widths = [max(len(r[col]) for r in rows) for col in range(len(header))]
+        # Формуємо рядки тексту
+        lines = []
+        # header
+        hline = " | ".join(rows[0][col].rjust(col_widths[col]) for col in range(len(header)))
+        lines.append(hline)
+        lines.append("-" * len(hline))
+        for r in rows[1:]:
+            line = " | ".join(r[col].rjust(col_widths[col]) for col in range(len(header)))
+            lines.append(line)
+        return "\n".join(lines)
+
+    def print_tableau(self):
+        """Друкує поточну симплекс-таблицю в консоль у відформатованому вигляді.
+
+        Використовує format_tableau()."""
+        print(self.format_tableau())
+
+    def final_report(self, as_str: bool = False) -> Dict:
+        """Повертає фінальний звіт після розв'язання задачі.
+
+        Повертає словник з ключами:
+          - 'primal_x': список з 5 значень (Fraction) для x1..x5 (додає нулі якщо потрібно)
+          - 'F_max': значення цільової функції (Fraction)
+          - 'dual_y': список з 4 значень (Fraction) для y1..y4, взятих з Δ під початковими вільними змінними
+        Якщо as_str=True — також додається 'primal_x_str', 'F_max_str', 'dual_y_str' з красиво відформатованими рядками.
+        """
+        if self.solution is None:
+            # Якщо ще не розв'язано — спробуємо викликати solve()
+            self.solve()
+        # Пояснюємо x: беремо перші 5 основних змінних (або доповнюємо нулями)
+        primal = list(self.solution[:5]) + [Fraction(0)] * max(0, 5 - len(self.solution))
+        # F_max — оптимальне значення цільової функції
+        F_max = self.optimal_value
+        # Dual variables y: беремо Δ під початковими вільними змінними
+        # Обчислюємо Δ для поточної таблиці
+        delta = self._compute_delta()
+        # початкові вільні змінні мали індекси n..n+m-1
+        dual = []
+        for i in range(4):
+            # Додаємо лише ті dual-значення, що відповідають початковим вільним змінним
+            if i < self.m:
+                idx = self.n + i
+                dual.append(delta[idx])
+            else:
+                dual.append(Fraction(0))
+        report = {'primal_x': primal, 'F_max': F_max, 'dual_y': dual}
+        if as_str:
+            report['primal_x_str'] = [self._frac_to_str(v) for v in report['primal_x']]
+            report['F_max_str'] = self._frac_to_str(report['F_max'])
+            report['dual_y_str'] = [self._frac_to_str(v) for v in report['dual_y']]
+        return report
+
 
 
 # Приклади використання

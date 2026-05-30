@@ -111,7 +111,7 @@ class TestSimplexSolver(unittest.TestCase):
         # Матриця має розмір (m) x (n+m+1) (ми більше не зберігаємо окремого рядка z)
         # m=2, n=2, отже (2) x (5)
         self.assertEqual(len(solver.tableau), 2)  # 2 обмеження
-        self.assertEqual(len(solver.tableau[0]), 5)  # 2 оригінальні + 2 слабкі + 1 RHS
+        self.assertEqual(len(solver.tableau[0]), 5)  # 2 основні + 2 вільні + 1 RHS
     
     def test_fractions_precision(self):
         """Тест точності без похибок округлення"""
